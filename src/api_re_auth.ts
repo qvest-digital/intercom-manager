@@ -1,4 +1,5 @@
 import { FastifyPluginCallback } from 'fastify';
+import { Log } from './log';
 import { ErrorResponse, ReAuthResponse } from './models';
 
 const OSC_ACCESS_TOKEN = process.env.OSC_ACCESS_TOKEN;
@@ -70,8 +71,12 @@ const apiReAuth: FastifyPluginCallback = (fastify, _, next) => {
           }
         }
 
+        Log().error(
+          `Failed to generate new SAT Token after ${REAUTH_MAX_ATTEMPTS} attempts:`,
+          lastError
+        );
         reply.code(500).send({
-          error:
+          message:
             'ServiceToken Service failed to generate new SAT Token after ' +
             REAUTH_MAX_ATTEMPTS +
             ' attempts'
@@ -79,7 +84,7 @@ const apiReAuth: FastifyPluginCallback = (fastify, _, next) => {
       } else {
         reply
           .code(405)
-          .send({ error: 'No OSC_ACCESS_TOKEN set, method not allowed' });
+          .send({ message: 'No OSC_ACCESS_TOKEN set, method not allowed' });
       }
     }
   );

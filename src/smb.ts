@@ -10,6 +10,71 @@ interface AllocateConferenceResponse {
   id: string;
 }
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// The Symphony Media Bridge legacy API represents codec lists as a
+// `payload-types` array, whereas intercom-manager models a single
+// `payload-type`. These helpers translate at the SMB boundary so the rest of
+// the codebase can keep using the singular form unchanged.
+
+// Collapse `payload-types` (array) into a single `payload-type`. For audio we
+// prefer Opus; otherwise the first entry is used.
+function collapsePayloadTypes(media: any, preferredName?: string): void {
+  if (!media || typeof media !== 'object') {
+    return;
+  }
+  const payloadTypes = media['payload-types'];
+  if (Array.isArray(payloadTypes) && media['payload-type'] === undefined) {
+    let selected = payloadTypes[0];
+    if (preferredName) {
+      const preferred = payloadTypes.find(
+        (pt) =>
+          typeof pt?.name === 'string' &&
+          pt.name.toLowerCase() === preferredName.toLowerCase()
+      );
+      if (preferred) {
+        selected = preferred;
+      }
+    }
+    if (selected !== undefined) {
+      media['payload-type'] = selected;
+    }
+    delete media['payload-types'];
+  }
+}
+
+// Expand a singular `payload-type` back into the SMB `payload-types` array form.
+function expandPayloadType(media: any): void {
+  if (!media || typeof media !== 'object') {
+    return;
+  }
+  if (media['payload-type'] !== undefined && media['payload-types'] === undefined) {
+    media['payload-types'] = [media['payload-type']];
+    delete media['payload-type'];
+  }
+}
+
+// Normalize an SMB endpoint-description response into the singular form the
+// manager expects.
+function normalizeSmbResponse<T>(description: T): T {
+  const desc = description as any;
+  if (desc && typeof desc === 'object') {
+    collapsePayloadTypes(desc.audio, 'opus');
+    collapsePayloadTypes(desc.video);
+  }
+  return description;
+}
+
+// Convert an endpoint description that uses the singular `payload-type` back
+// into the array form the SMB legacy API accepts on configure.
+function denormalizeForSmb(request: any): any {
+  if (request && typeof request === 'object') {
+    expandPayloadType(request.audio);
+    expandPayloadType(request.video);
+  }
+  return request;
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
 interface BaseAllocationRequest {
   action: string;
   'bundle-transport': {
@@ -153,8 +218,9 @@ export class SmbProtocol implements ISmbProtocol {
       );
     }
 
-    const smbEndpointDescription: SmbEndpointDescription =
-      (await response.json()) as SmbEndpointDescription;
+    const smbEndpointDescription: SmbEndpointDescription = normalizeSmbResponse(
+      (await response.json()) as SmbEndpointDescription
+    );
 
     return smbEndpointDescription;
   }
@@ -202,7 +268,9 @@ export class SmbProtocol implements ISmbProtocol {
     }
 
     const smbEndpointDescription: SmbAudioEndpointDescription =
-      (await response.json()) as SmbAudioEndpointDescription;
+      normalizeSmbResponse(
+        (await response.json()) as SmbAudioEndpointDescription
+      );
 
     return smbEndpointDescription;
   }
@@ -214,7 +282,9 @@ export class SmbProtocol implements ISmbProtocol {
     endpointDescription: SmbEndpointDescription,
     smbKey: string
   ): Promise<void> {
-    const request = JSON.parse(JSON.stringify(endpointDescription));
+    const request = denormalizeForSmb(
+      JSON.parse(JSON.stringify(endpointDescription))
+    );
     request['action'] = 'configure';
     const url = smbUrl + conferenceId + '/' + endpointId;
     const response = await fetch(url, {
