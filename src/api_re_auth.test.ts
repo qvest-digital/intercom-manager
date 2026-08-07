@@ -1,103 +1,106 @@
-import api from './api';
-import { CoreFunctions } from './api_productions_core_functions';
-import { ConnectionQueue } from './connection_queue';
-import { UserSession } from './models';
+import fastifyCookie from '@fastify/cookie';
+import fastify, { FastifyInstance } from 'fastify';
 
-jest.mock('./db/interface', () => ({
-  getIngests: jest.fn().mockResolvedValue([]),
-  connect: jest.fn()
-}));
+const ORIGINAL_OSC_ACCESS_TOKEN = process.env.OSC_ACCESS_TOKEN;
 
-jest.mock('./ingest_manager', () => {
-  return {
-    IngestManager: jest.fn().mockImplementation(() => ({
-      load: jest.fn().mockResolvedValue(undefined),
-      startPolling: jest.fn()
-    }))
-  };
-});
-
-jest.mock('./db/mongodb');
-
-const mockDbManager = {
-  connect: jest.fn().mockResolvedValue(undefined),
-  disconnect: jest.fn().mockResolvedValue(undefined),
-  getProduction: jest.fn().mockResolvedValue(undefined),
-  getProductions: jest.fn().mockResolvedValue([]),
-  getProductionsLength: jest.fn().mockResolvedValue(0),
-  updateProduction: jest.fn().mockResolvedValue(undefined),
-  addProduction: jest.fn().mockResolvedValue({}),
-  deleteProduction: jest.fn().mockResolvedValue(true),
-  setLineConferenceId: jest.fn().mockResolvedValue(undefined),
-  addIngest: jest.fn().mockResolvedValue({}),
-  getIngest: jest.fn().mockResolvedValue(undefined),
-  getIngestsLength: jest.fn().mockResolvedValue(0),
-  getIngests: jest.fn().mockResolvedValue([]),
-  updateIngest: jest.fn().mockResolvedValue(undefined),
-  deleteIngest: jest.fn().mockResolvedValue(true),
-  saveUserSession: jest.fn().mockResolvedValue(undefined),
-  getSession: jest.fn().mockResolvedValue(null),
-  deleteUserSession: jest.fn().mockResolvedValue(true),
-  updateSession: jest.fn().mockResolvedValue(true),
-  getSessionsByQuery: jest.fn().mockResolvedValue([]),
-  addPreset: jest.fn().mockResolvedValue({}),
-  getPreset: jest.fn().mockResolvedValue(undefined),
-  getPresets: jest.fn().mockResolvedValue([]),
-  deletePreset: jest.fn().mockResolvedValue(true),
-  updatePreset: jest.fn().mockResolvedValue(undefined)
+// The route reads OSC_ACCESS_TOKEN at module load, so every case needs an
+// isolated module registry to pick up the env it wants to exercise. Registering
+// only this plugin keeps the cases off the full api() bootstrap.
+const buildServer = async (
+  oscAccessToken: string | undefined
+): Promise<FastifyInstance> => {
+  jest.resetModules();
+  if (oscAccessToken === undefined) {
+    delete process.env.OSC_ACCESS_TOKEN;
+  } else {
+    process.env.OSC_ACCESS_TOKEN = oscAccessToken;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const apiReAuth = require('./api_re_auth').default;
+  const server = fastify();
+  server.register(fastifyCookie);
+  server.register(apiReAuth, { prefix: '/api/v1' });
+  await server.ready();
+  return server;
 };
 
-const mockProductionManager = {
-  checkUserStatus: jest.fn(),
-  load: jest.fn().mockResolvedValue(undefined),
-  createProduction: jest.fn().mockResolvedValue({}),
-  getProductions: jest.fn().mockResolvedValue([]),
-  getNumberOfProductions: jest.fn().mockResolvedValue(0),
-  requireProduction: jest.fn().mockResolvedValue({}),
-  updateProduction: jest.fn().mockResolvedValue({}),
-  addProductionLine: jest.fn().mockResolvedValue(undefined),
-  getLine: jest.fn().mockResolvedValue(undefined),
-  getUsersForLine: jest.fn().mockResolvedValue([]),
-  updateProductionLine: jest.fn().mockResolvedValue({}),
-  deleteProductionLine: jest.fn().mockResolvedValue(undefined),
-  deleteProduction: jest.fn().mockResolvedValue(true),
-  removeUserSession: jest.fn().mockResolvedValue('session-id'),
-  getUser: jest.fn().mockResolvedValue(undefined),
-  requireLine: jest.fn().mockResolvedValue({}),
-  updateUserLastSeen: jest.fn().mockResolvedValue(true),
-  getProduction: jest.fn().mockResolvedValue(undefined),
-  setLineId: jest.fn().mockResolvedValue(undefined),
-  createUserSession: jest.fn(),
-  updateUserEndpoint: jest.fn().mockResolvedValue(true),
-  on: jest.fn(),
-  once: jest.fn(),
-  emit: jest.fn()
-} as any;
-
-const mockIngestManager = {
-  load: jest.fn().mockResolvedValue(undefined),
-  startPolling: jest.fn()
-} as any;
-
 describe('reAuth api', () => {
-  test('can generate a new SAT Token for the OSC Intercom instance', async () => {
-    const server = await api({
-      title: 'my awesome service',
-      smbServerBaseUrl: 'http://localhost',
-      endpointIdleTimeout: '60',
-      publicHost: 'https://example.com',
-      dbManager: mockDbManager,
-      productionManager: mockProductionManager,
-      ingestManager: mockIngestManager,
-      coreFunctions: new CoreFunctions(
-        mockProductionManager,
-        new ConnectionQueue()
-      )
-    });
+  let fetchSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    fetchSpy = jest.spyOn(global, 'fetch');
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  afterAll(() => {
+    process.env.OSC_ACCESS_TOKEN = ORIGINAL_OSC_ACCESS_TOKEN;
+  });
+
+  test('rejects with 405 and a readable message when no OSC token is configured', async () => {
+    const server = await buildServer(undefined);
+
     const response = await server.inject({
       method: 'GET',
       url: '/api/v1/reauth'
     });
-    expect(response.statusCode).toBe(500);
+
+    expect(response.statusCode).toBe(405);
+    // The reply has to match the declared ErrorResponse schema. Sending any
+    // other property makes the serializer throw and replaces the body with
+    // '"message" is required!', hiding the actual reason from the client.
+    expect(response.json()).toEqual({
+      message: 'No OSC_ACCESS_TOKEN set, method not allowed'
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    await server.close();
   });
+
+  test('returns the token and sets the SAT cookie on success', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      json: async () => ({ token: 'sat-token' })
+    } as Response);
+    const server = await buildServer('pat-token');
+
+    const response = await server.inject({
+      method: 'GET',
+      url: '/api/v1/reauth'
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ token: 'sat-token' });
+    expect(response.headers['set-cookie']).toContain(
+      'eyevinn-intercom-manager.sat=Bearer%20sat-token'
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    await server.close();
+  });
+
+  test('retries then fails with 500 and a readable message', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable'
+    } as Response);
+    const server = await buildServer('pat-token');
+
+    const response = await server.inject({
+      method: 'GET',
+      url: '/api/v1/reauth'
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({
+      message:
+        'ServiceToken Service failed to generate new SAT Token after 3 attempts'
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+
+    await server.close();
+  }, 10000);
 });

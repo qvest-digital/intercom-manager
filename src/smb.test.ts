@@ -419,4 +419,99 @@ describe('SmbProtocol', () => {
       expect(result).toEqual([]);
     });
   });
+
+  // ── payload-types <-> payload-type translation ─────────────────────
+
+  describe('SMB payload-types translation', () => {
+    // Response shaped like the current Symphony Media Bridge legacy API,
+    // which returns codec lists as a `payload-types` array.
+    const pluralResponse = {
+      'bundle-transport': { ice: { ufrag: 'a', pwd: 'b', candidates: [] } },
+      audio: {
+        ssrcs: [1, 2],
+        'payload-types': [
+          {
+            id: 111,
+            name: 'opus',
+            clockrate: 48000,
+            channels: 2,
+            parameters: { minptime: '10', useinbandfec: '1' },
+            'rtcp-fbs': []
+          },
+          { id: 110, name: 'telephone-event', clockrate: 48000, parameters: {} }
+        ],
+        'rtp-hdrexts': []
+      },
+      video: {
+        ssrcs: [],
+        'payload-types': [{ id: 100, name: 'VP8', clockrate: 90000, parameters: {} }],
+        'rtp-hdrexts': []
+      }
+    };
+
+    it('collapses audio payload-types to a single opus payload-type', async () => {
+      mockFetch.mockResolvedValue(mockResponse(200, pluralResponse));
+
+      const result: any = await smb.allocateEndpoint(
+        smbUrl,
+        'conf-1',
+        'ep-1',
+        true,
+        true,
+        true,
+        'ssrc-rewrite',
+        60,
+        smbKey
+      );
+
+      expect(result.audio['payload-types']).toBeUndefined();
+      expect(result.audio['payload-type']).toEqual({
+        id: 111,
+        name: 'opus',
+        clockrate: 48000,
+        channels: 2,
+        parameters: { minptime: '10', useinbandfec: '1' },
+        'rtcp-fbs': []
+      });
+      // video is collapsed too (first entry)
+      expect(result.video['payload-type'].name).toBe('VP8');
+      expect(result.video['payload-types']).toBeUndefined();
+    });
+
+    it('expands payload-type back to payload-types on configure', async () => {
+      mockFetch.mockResolvedValue(mockResponse(200, null));
+
+      const endpointDescription: any = {
+        'bundle-transport': {},
+        audio: {
+          ssrcs: [1],
+          'payload-type': { id: 111, name: 'opus', clockrate: 48000, parameters: {} },
+          'rtp-hdrexts': []
+        },
+        video: {
+          ssrcs: [],
+          'payload-type': { id: 100, name: 'VP8', clockrate: 90000, parameters: {} },
+          'rtp-hdrexts': []
+        }
+      };
+
+      await smb.configureEndpoint(
+        smbUrl,
+        'conf-1',
+        'ep-1',
+        endpointDescription,
+        smbKey
+      );
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.action).toBe('configure');
+      expect(body.audio['payload-type']).toBeUndefined();
+      expect(body.audio['payload-types']).toEqual([
+        { id: 111, name: 'opus', clockrate: 48000, parameters: {} }
+      ]);
+      expect(body.video['payload-types']).toHaveLength(1);
+      // caller's object is not mutated
+      expect(endpointDescription.audio['payload-type']).toBeDefined();
+    });
+  });
 });
